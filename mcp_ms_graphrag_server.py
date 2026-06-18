@@ -5,8 +5,8 @@ GraphRAG MCP Server — Streamable HTTP Transport
 所有工具回傳都走 MCP 協定，無 side-channel。
 
 使用方式:
-    GRAPHRAG_DB_ROOT=/path/to/database python server.py
-    e.g GRAPHRAG_DB_ROOT=/workspace/DbAB157x python mcp_ms_graphrag_server.py
+    python mcp_ms_graphrag_server.py
+    查詢時以各工具的 database 參數選擇內建資料庫（"Airoha" / "MS GraphRAG"，預設 "Airoha"）。
 
 Claude Code 連接:
     claude mcp add --transport http graphrag http://localhost:8000/mcp
@@ -24,7 +24,14 @@ from mcp.server.fastmcp import FastMCP
 # ---------------------------------------------------------------------------
 # 設定
 # ---------------------------------------------------------------------------
-GRAPHRAG_DB_ROOT = os.environ.get("GRAPHRAG_DB_ROOT", "/workspace/grapgrag_db_general")
+# 內建資料庫對照表：名稱 → GraphRAG 資料庫路徑。
+# 每次查詢由各工具的 database 參數指定要使用哪一個（無共享狀態，方便水平擴展）。
+BUILTIN_DATABASES = {
+    "Airoha": "/workspace/DB_AIROHA",
+    "MS GraphRAG": "/workspace/DB_MS_GRAPHRAG",
+}
+DEFAULT_DATABASE = "Airoha"
+
 HOST = os.environ.get("MCP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("MCP_PORT", "8000"))
 QUERY_TIMEOUT = int(os.environ.get("GRAPHRAG_QUERY_TIMEOUT", "240"))
@@ -38,8 +45,11 @@ QUERY_TIMEOUT = int(os.environ.get("GRAPHRAG_QUERY_TIMEOUT", "240"))
 SERVER_INSTRUCTIONS = """\
 這是一個 GraphRAG 知識圖譜查詢服務，對「已索引的文件」提供圖譜式問答。
 
+本服務內建多個資料庫（Airoha、MS GraphRAG），預設為 Airoha。
+每個工具都有 database 參數；查詢其他資料庫時帶入 "MS GraphRAG" 即可。
+
 建議使用流程：
-1. 首次使用先呼叫 graphrag_index_status，確認索引已完成、資料可用。
+1. 首次使用先呼叫 graphrag_index_status（可帶 database 參數），確認索引已完成、資料可用。
 2. 若不清楚圖譜內容，用 graphrag_list_entities 瀏覽有哪些實體（entity）。
 3. 用 graphrag_query 提問，並依問題類型選擇 method：
    • local ：針對特定實體或具體細節（「X 是什麼？」「A 與 B 的關係？」）。
@@ -70,23 +80,31 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 # 輔助函式
 # ---------------------------------------------------------------------------
-def _resolve_root() -> Path:
-    """解析並驗證 GraphRAG 專案根目錄"""
-    root = Path(GRAPHRAG_DB_ROOT).resolve()
+def _resolve_root(database: str = DEFAULT_DATABASE) -> Path:
+    """依資料庫名稱解析並驗證 GraphRAG 專案根目錄。
+
+    未知名稱 raise ValueError；目錄不存在 raise FileNotFoundError。
+    """
+    if database not in BUILTIN_DATABASES:
+        raise ValueError(
+            f"未知的資料庫名稱: {database}，可選: {list(BUILTIN_DATABASES)}"
+        )
+    root = Path(BUILTIN_DATABASES[database]).resolve()
     if not root.exists():
         raise FileNotFoundError(
-            f"GraphRAG 專案目錄不存在: {root}\n"
-            f"請設定環境變數 GRAPHRAG_DB_ROOT 指向已 index 的專案目錄"
+            f"GraphRAG 資料庫目錄不存在: {root}（database={database}），"
+            f"請確認該資料庫已建立並完成索引"
         )
     return root
 
 
 async def _run_graphrag_cli(
     args: list[str],
+    cwd: Path,
     timeout: int = QUERY_TIMEOUT,
 ) -> dict:
     """
-    透過 subprocess 執行 graphrag CLI 指令。
+    在指定的資料庫目錄（cwd）下，透過 subprocess 執行 graphrag CLI 指令。
     回傳 {"success": bool, "output": str, "error": str}
     """
     cmd = [sys.executable, "-m", "graphrag"] + args
@@ -95,7 +113,7 @@ async def _run_graphrag_cli(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=str(_resolve_root()),
+            cwd=str(cwd),
         )
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=timeout
@@ -139,6 +157,7 @@ async def graphrag_query(
     query: str,
     method: str = "local",
     community_level: int = 2,
+    database: str = "Airoha",
 ) -> str:
     """
     對 GraphRAG 知識圖譜執行查詢。
@@ -147,6 +166,7 @@ async def graphrag_query(
         query: 查詢問題，例如 "這個專案的核心架構是什麼？"
         method: 搜尋方式，可選 local（特定實體）、global（全局主題）、drift（混合）
         community_level: 社群階層等級，數字越小涵蓋越廣，越大越精細（預設 2）
+        database: 要查詢的內建資料庫，"Airoha" 或 "MS GraphRAG"（預設 "Airoha"）
 
     Returns:
         GraphRAG 的查詢結果文字
@@ -162,6 +182,15 @@ async def graphrag_query(
             ensure_ascii=False,
         )
 
+    # 解析並驗證資料庫
+    try:
+        root = _resolve_root(database)
+    except (ValueError, FileNotFoundError) as e:
+        return json.dumps(
+            {"success": False, "database": database, "error": str(e)},
+            ensure_ascii=False,
+        )
+
     # 組合 CLI 指令
     args = [
         "query",
@@ -170,12 +199,13 @@ async def graphrag_query(
         "--community-level", str(community_level),
     ]
 
-    result = await _run_graphrag_cli(args)
+    result = await _run_graphrag_cli(args, cwd=root)
 
     if result["success"]:
         return json.dumps(
             {
                 "success": True,
+                "database": database,
                 "method": method,
                 "community_level": community_level,
                 "query": query,
@@ -187,6 +217,7 @@ async def graphrag_query(
         return json.dumps(
             {
                 "success": False,
+                "database": database,
                 "method": method,
                 "query": query,
                 "error": result["error"],
@@ -197,18 +228,25 @@ async def graphrag_query(
 
 
 @mcp.tool()
-async def graphrag_index_status() -> str:
+async def graphrag_index_status(database: str = "Airoha") -> str:
     """
     檢查 GraphRAG 索引狀態。回傳專案目錄結構、output 目錄內的 artifact 檔案清單與大小。
     用於確認索引是否已完成、資料是否可用。
+
+    Args:
+        database: 要檢查的內建資料庫，"Airoha" 或 "MS GraphRAG"（預設 "Airoha"）
     """
     try:
-        root = _resolve_root()
-    except FileNotFoundError as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+        root = _resolve_root(database)
+    except (ValueError, FileNotFoundError) as e:
+        return json.dumps(
+            {"success": False, "database": database, "error": str(e)},
+            ensure_ascii=False,
+        )
 
     status = {
         "success": True,
+        "database": database,
         "root": str(root),
         "settings_exists": (root / "settings.yaml").exists(),
         "env_exists": (root / ".env").exists(),
@@ -249,12 +287,13 @@ async def graphrag_index_status() -> str:
 
 
 @mcp.tool()
-async def graphrag_list_entities(top_n: int = 20) -> str:
+async def graphrag_list_entities(top_n: int = 20, database: str = "Airoha") -> str:
     """
     列出知識圖譜中的 entities（實體）名稱。
 
     Args:
         top_n: 回傳前幾筆 entity（預設 20，最大 200）
+        database: 要查詢的內建資料庫，"Airoha" 或 "MS GraphRAG"（預設 "Airoha"）
 
     Returns:
         Entity 名稱清單與基本資訊
@@ -262,9 +301,12 @@ async def graphrag_list_entities(top_n: int = 20) -> str:
     top_n = min(max(1, top_n), 200)
 
     try:
-        root = _resolve_root()
-    except FileNotFoundError as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+        root = _resolve_root(database)
+    except (ValueError, FileNotFoundError) as e:
+        return json.dumps(
+            {"success": False, "database": database, "error": str(e)},
+            ensure_ascii=False,
+        )
 
     # 嘗試找 entities parquet 檔
     output_dir = root / "output"
@@ -278,6 +320,7 @@ async def graphrag_list_entities(top_n: int = 20) -> str:
         return json.dumps(
             {
                 "success": False,
+                "database": database,
                 "error": "找不到 entities parquet 檔案，請確認已完成 graphrag index",
             },
             ensure_ascii=False,
@@ -300,6 +343,7 @@ async def graphrag_list_entities(top_n: int = 20) -> str:
             return json.dumps(
                 {
                     "success": True,
+                    "database": database,
                     "warning": "無法辨識 name 欄位",
                     "columns": list(df.columns),
                     "row_count": len(df),
@@ -322,6 +366,7 @@ async def graphrag_list_entities(top_n: int = 20) -> str:
         return json.dumps(
             {
                 "success": True,
+                "database": database,
                 "total_entities": len(df),
                 "showing": len(entities),
                 "source_file": str(entity_files[0].name),
@@ -357,15 +402,21 @@ _GUIDE = """\
 ## 服務簡介
 對「已用 Microsoft GraphRAG 索引過的文件」提供圖譜式問答，底層透過 graphrag CLI 執行查詢。
 
-## 可用工具
-- `graphrag_index_status()`：檢查索引狀態與 output artifact 清單。
-- `graphrag_list_entities(top_n=20)`：列出圖譜中的實體（entity），最大 200。
-- `graphrag_query(query, method, community_level)`：核心查詢工具。
+## 內建資料庫
+- `Airoha`（預設）→ /workspace/DB_AIROHA
+- `MS GraphRAG` → /workspace/DB_MS_GRAPHRAG
+
+每個工具都有 database 參數，預設 "Airoha"；查詢其他資料庫時帶入對應名稱即可。
+
+## 可用工具（皆可帶 database 參數："Airoha" / "MS GraphRAG"）
+- `graphrag_index_status(database="Airoha")`：檢查索引狀態與 output artifact 清單。
+- `graphrag_list_entities(top_n=20, database="Airoha")`：列出圖譜中的實體（entity），最大 200。
+- `graphrag_query(query, method, community_level, database="Airoha")`：核心查詢工具。
 
 ## 建議工作流程
-1. 先 `graphrag_index_status()` 確認 output 目錄已有 artifact（代表索引完成）。
-2. 不熟悉內容時，用 `graphrag_list_entities()` 了解圖譜涵蓋哪些實體。
-3. 用 `graphrag_query()` 提問。
+1. 先 `graphrag_index_status(database=...)` 確認 output 目錄已有 artifact（代表索引完成）。
+2. 不熟悉內容時，用 `graphrag_list_entities(database=...)` 了解圖譜涵蓋哪些實體。
+3. 用 `graphrag_query(..., database=...)` 提問。
 
 ## method 怎麼選
 | method | 適用情境 | 範例 |
@@ -381,8 +432,10 @@ _GUIDE = """\
 ## 範例
 - 全局總結：`graphrag_query(query="總結整體內容", method="global", community_level=1)`
 - 實體關係：`graphrag_query(query="A 與 B 的關係", method="local")`
+- 指定資料庫：`graphrag_query(query="...", method="local", database="MS GraphRAG")`
 
 ## 錯誤排解（success=false 時讀 error 欄位）
+- 「未知的資料庫名稱」→ 只能用 "Airoha" 或 "MS GraphRAG"
 - 「找不到 graphrag 指令」→ `pip install graphrag`
 - 「output 目錄不存在」→ 尚未執行 `graphrag index`
 - 「查詢逾時」→ 調高環境變數 GRAPHRAG_QUERY_TIMEOUT，或簡化問題
@@ -393,7 +446,7 @@ _GUIDE = """\
     "guide://graphrag",
     name="graphrag_usage_guide",
     title="GraphRAG 使用手冊",
-    description="GraphRAG 查詢服務的完整使用手冊：工作流程、method 選擇、範例與錯誤排解。",
+    description="GraphRAG 查詢服務的完整使用手冊：內建資料庫、工作流程、method 選擇、範例與錯誤排解。",
     mime_type="text/markdown",
 )
 def usage_guide() -> str:
@@ -407,12 +460,12 @@ def usage_guide() -> str:
 @mcp.prompt(
     name="summarize_knowledge_base",
     title="總結知識庫",
-    description="引導 agent 用 global 查詢，對整個知識庫做結構化總結。",
+    description="引導 agent 用 global 查詢，對指定資料庫做結構化總結。",
 )
-def summarize_knowledge_base() -> str:
+def summarize_knowledge_base(database: str = "Airoha") -> str:
     return (
-        "請先用 graphrag_index_status 確認索引可用，"
-        '再用 graphrag_query 以 method="global"、community_level=1 '
+        f'請先用 graphrag_index_status（database="{database}"）確認索引可用，'
+        f'再用 graphrag_query 以 database="{database}"、method="global"、community_level=1 '
         "對整個知識庫做一份結構化總結，列出主要主題及其關聯。"
     )
 
@@ -420,11 +473,11 @@ def summarize_knowledge_base() -> str:
 @mcp.prompt(
     name="ask_about_topic",
     title="查詢特定主題",
-    description="針對指定主題提問，並自動建議合適的查詢 method。",
+    description="針對指定主題與資料庫提問，並自動建議合適的查詢 method。",
 )
-def ask_about_topic(topic: str) -> str:
+def ask_about_topic(topic: str, database: str = "Airoha") -> str:
     return (
-        f"請用 graphrag_query 查詢「{topic}」。"
+        f'請用 graphrag_query 查詢「{topic}」（database="{database}"）。'
         '若問題聚焦於特定實體或細節，使用 method="local"；'
         '若需要跨文件彙整，使用 method="global"。'
         "必要時先用 graphrag_list_entities 確認相關實體名稱。"
@@ -436,7 +489,9 @@ def ask_about_topic(topic: str) -> str:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print(f"GraphRAG MCP Server")
-    print(f"  Root:      {Path(GRAPHRAG_DB_ROOT).resolve()}")
+    print(f"  Databases: (預設 {DEFAULT_DATABASE})")
+    for _name, _path in BUILTIN_DATABASES.items():
+        print(f"    - {_name}: {_path}")
     print(f"  Endpoint:  http://{HOST}:{PORT}/mcp")
     print(f"  Transport: Streamable HTTP")
     print(f"  Timeout:   {QUERY_TIMEOUT}s")
