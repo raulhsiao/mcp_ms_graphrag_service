@@ -50,6 +50,7 @@ SERVER_INSTRUCTIONS = """\
 - community_level 數字越小越概觀、越大越精細（預設 2）；global 查詢通常用較小的值。
 - 查詢會實際執行 graphrag CLI，可能需數十秒，請耐心等待（預設逾時 120 秒）。
 - 所有工具皆回傳 JSON 字串並含 success 欄位；success=false 時請讀取 error 欄位。
+- 需要完整使用範例與錯誤排解，可讀取 resource：guide://graphrag。
 """
 
 mcp = FastMCP(
@@ -345,6 +346,89 @@ async def graphrag_list_entities(top_n: int = 20) -> str:
             },
             ensure_ascii=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# MCP Resource — 完整使用手冊（agent 可按需讀取）
+# ---------------------------------------------------------------------------
+_GUIDE = """\
+# GraphRAG 知識圖譜查詢服務 — 使用手冊
+
+## 服務簡介
+對「已用 Microsoft GraphRAG 索引過的文件」提供圖譜式問答，底層透過 graphrag CLI 執行查詢。
+
+## 可用工具
+- `graphrag_index_status()`：檢查索引狀態與 output artifact 清單。
+- `graphrag_list_entities(top_n=20)`：列出圖譜中的實體（entity），最大 200。
+- `graphrag_query(query, method, community_level)`：核心查詢工具。
+
+## 建議工作流程
+1. 先 `graphrag_index_status()` 確認 output 目錄已有 artifact（代表索引完成）。
+2. 不熟悉內容時，用 `graphrag_list_entities()` 了解圖譜涵蓋哪些實體。
+3. 用 `graphrag_query()` 提問。
+
+## method 怎麼選
+| method | 適用情境 | 範例 |
+| ------ | -------- | ---- |
+| local  | 特定實體 / 具體細節 | 「X 元件的職責是什麼？」 |
+| global | 全局主題 / 跨文件彙整 | 「這批文件的主要議題有哪些？」 |
+| drift  | 兼顧細節與廣度的混合查詢 | 「X 如何運作、又與誰相關？」 |
+
+## community_level
+- 控制社群階層細緻度：數字小 → 大社群、偏概觀；數字大 → 小社群、偏細節。
+- global 查詢建議 1–2；local 查詢可用 2–3。預設 2。
+
+## 範例
+- 全局總結：`graphrag_query(query="總結整體內容", method="global", community_level=1)`
+- 實體關係：`graphrag_query(query="A 與 B 的關係", method="local")`
+
+## 錯誤排解（success=false 時讀 error 欄位）
+- 「找不到 graphrag 指令」→ `pip install graphrag`
+- 「output 目錄不存在」→ 尚未執行 `graphrag index`
+- 「查詢逾時」→ 調高環境變數 GRAPHRAG_QUERY_TIMEOUT，或簡化問題
+"""
+
+
+@mcp.resource(
+    "guide://graphrag",
+    name="graphrag_usage_guide",
+    title="GraphRAG 使用手冊",
+    description="GraphRAG 查詢服務的完整使用手冊：工作流程、method 選擇、範例與錯誤排解。",
+    mime_type="text/markdown",
+)
+def usage_guide() -> str:
+    """回傳完整使用手冊（Markdown）。"""
+    return _GUIDE
+
+
+# ---------------------------------------------------------------------------
+# MCP Prompts — 預設提問範本（使用者可在 client 介面挑選）
+# ---------------------------------------------------------------------------
+@mcp.prompt(
+    name="summarize_knowledge_base",
+    title="總結知識庫",
+    description="引導 agent 用 global 查詢，對整個知識庫做結構化總結。",
+)
+def summarize_knowledge_base() -> str:
+    return (
+        "請先用 graphrag_index_status 確認索引可用，"
+        '再用 graphrag_query 以 method="global"、community_level=1 '
+        "對整個知識庫做一份結構化總結，列出主要主題及其關聯。"
+    )
+
+
+@mcp.prompt(
+    name="ask_about_topic",
+    title="查詢特定主題",
+    description="針對指定主題提問，並自動建議合適的查詢 method。",
+)
+def ask_about_topic(topic: str) -> str:
+    return (
+        f"請用 graphrag_query 查詢「{topic}」。"
+        '若問題聚焦於特定實體或細節，使用 method="local"；'
+        '若需要跨文件彙整，使用 method="global"。'
+        "必要時先用 graphrag_list_entities 確認相關實體名稱。"
+    )
 
 
 # ---------------------------------------------------------------------------
