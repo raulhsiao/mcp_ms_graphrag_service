@@ -32,8 +32,30 @@ QUERY_TIMEOUT = int(os.environ.get("GRAPHRAG_QUERY_TIMEOUT", "120"))
 # ---------------------------------------------------------------------------
 # MCP Server 初始化
 # ---------------------------------------------------------------------------
+# instructions 會在 MCP initialize handshake 時回傳給 client，
+# client（如 Claude）通常會把它注入 system prompt，
+# 讓 agent 在呼叫任何工具「之前」就知道這個服務怎麼用。
+SERVER_INSTRUCTIONS = """\
+這是一個 GraphRAG 知識圖譜查詢服務，對「已索引的文件」提供圖譜式問答。
+
+建議使用流程：
+1. 首次使用先呼叫 graphrag_index_status，確認索引已完成、資料可用。
+2. 若不清楚圖譜內容，用 graphrag_list_entities 瀏覽有哪些實體（entity）。
+3. 用 graphrag_query 提問，並依問題類型選擇 method：
+   • local ：針對特定實體或具體細節（「X 是什麼？」「A 與 B 的關係？」）。
+   • global：針對全局、主題式、需彙整全文的問題（「主要主題有哪些？」「整體總結」）。
+   • drift ：兼顧細節與廣度的混合查詢；不確定時的折衷選擇。
+
+注意事項：
+- community_level 數字越小越概觀、越大越精細（預設 2）；global 查詢通常用較小的值。
+- 查詢會實際執行 graphrag CLI，可能需數十秒，請耐心等待（預設逾時 120 秒）。
+- 所有工具皆回傳 JSON 字串並含 success 欄位；success=false 時請讀取 error 欄位。
+"""
+
 mcp = FastMCP(
     name="graphrag",
+    # instructions：連線時自動傳給 agent 的服務使用說明
+    instructions=SERVER_INSTRUCTIONS,
     # host/port 必須在建構時設定，run() 不接受這些參數
     host=HOST,
     port=PORT,
