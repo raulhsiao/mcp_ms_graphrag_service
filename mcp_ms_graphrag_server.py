@@ -27,7 +27,7 @@ from mcp.server.fastmcp import FastMCP
 GRAPHRAG_DB_ROOT = os.environ.get("GRAPHRAG_DB_ROOT", "/workspace/grapgrag_db_general")
 HOST = os.environ.get("MCP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("MCP_PORT", "8000"))
-QUERY_TIMEOUT = int(os.environ.get("GRAPHRAG_QUERY_TIMEOUT", "120"))
+QUERY_TIMEOUT = int(os.environ.get("GRAPHRAG_QUERY_TIMEOUT", "240"))
 
 # ---------------------------------------------------------------------------
 # MCP Server 初始化
@@ -48,7 +48,7 @@ SERVER_INSTRUCTIONS = """\
 
 注意事項：
 - community_level 數字越小越概觀、越大越精細（預設 2）；global 查詢通常用較小的值。
-- 查詢會實際執行 graphrag CLI，可能需數十秒，請耐心等待（預設逾時 120 秒）。
+- 查詢會實際執行 graphrag CLI，可能需數十秒，請耐心等待（預設逾時 240 秒）。
 - 所有工具皆回傳 JSON 字串並含 success 欄位；success=false 時請讀取 error 欄位。
 - 需要完整使用範例與錯誤排解，可讀取 resource：guide://graphrag。
 """
